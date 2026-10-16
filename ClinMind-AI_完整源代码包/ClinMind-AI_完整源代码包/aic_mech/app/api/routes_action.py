@@ -1,5 +1,6 @@
 """Clinical Action Execution and Decision Router REST Routes."""
 
+import asyncio
 import time
 import uuid
 from typing import Dict, Any, List
@@ -37,7 +38,12 @@ async def execute_action(req: ActionRequest):
 
     # ================= 1. INQUIRY (问诊沟通) =================
     if action_type in (ActionType.INQUIRY, "inquiry", "ask"):
-        dialogues = session.agent_engine.handle_inquiry(content, current_state)
+        # handle_inquiry may invoke the synchronous LLM client when online;
+        # offload it so the event loop (and every monitor's telemetry) keeps
+        # running while the LLM responds.
+        dialogues = await asyncio.to_thread(
+            session.agent_engine.handle_inquiry, content, current_state
+        )
         feedback_message = f"已完成问诊沟通：【{content}】"
 
     # ================= 2. PHYSICAL EXAM (专科体查) =================
@@ -118,7 +124,10 @@ async def execute_action(req: ActionRequest):
 
     # ================= 4. MEDICATION (药物处方) =================
     elif action_type in (ActionType.MEDICATION, "medication", "treat", "prescription"):
-        dose = float(req.params.get("dose", 1.0)) if req.params else 1.0
+        try:
+            dose = float(req.params.get("dose", 1.0)) if req.params else 1.0
+        except (TypeError, ValueError):
+            dose = 1.0
         unit = str(req.params.get("unit", "mg")) if req.params else "mg"
         med_result = session.physiology_engine.apply_medication(content, dose, unit)
 

@@ -13,6 +13,9 @@ from app.core.agent_engine import AgentEngine
 from app.core.guardrail_engine import GuardrailEngine
 from app.core.ged_evaluator import GEDEvaluator
 
+# Finished or idle sessions are purged to bound memory usage.
+SESSION_TTL_SECONDS = 2 * 60 * 60
+
 
 class SimulationSession:
     """Encapsulates a single student's clinical training session."""
@@ -22,6 +25,7 @@ class SimulationSession:
         self.case_id: str = case_id
         self.student_name: str = student_name
         self.start_time: float = time.time()
+        self.last_active_at: float = time.time()
         self.virtual_seconds: int = 0
         self.is_active: bool = True
         self.is_finished: bool = False
@@ -36,8 +40,13 @@ class SimulationSession:
         self.action_history: List[ActionRecord] = []
         self.final_assessment: Optional[OSCEAssessment] = None
 
+    def touch(self) -> None:
+        """Mark the session as recently used for TTL eviction."""
+        self.last_active_at = time.time()
+
     def tick(self, dt: float = 1.0) -> VitalsVector:
         """Advance session time by dt seconds."""
+        self.touch()
         if not self.is_active or self.is_finished:
             return self.physiology_engine.get_current_vitals()
 
@@ -52,7 +61,6 @@ class SessionStore:
 
     def __init__(self):
         self._sessions: Dict[str, SimulationSession] = {}
-        self._default_session_id: Optional[str] = None
 
     @classmethod
     def get_instance(cls) -> "SessionStore":
@@ -61,24 +69,33 @@ class SessionStore:
         return cls._instance
 
     def create_session(self, case_id: str, student_name: str = "参赛学员") -> SimulationSession:
+        self._purge_stale_sessions()
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         session = SimulationSession(session_id, case_id, student_name)
         self._sessions[session_id] = session
-        self._default_session_id = session_id
         return session
 
     def get_session(self, session_id: Optional[str] = None) -> Optional[SimulationSession]:
-        if not session_id or session_id == "default":
-            session_id = self._default_session_id
+        """Strict lookup: only an exact, known session_id resolves.
 
-        if session_id and session_id in self._sessions:
-            return self._sessions[session_id]
+        Unknown or missing ids return None so callers can 404 instead of
+        silently falling back to another student's session.
+        """
+        if not session_id:
+            return None
+        session = self._sessions.get(session_id)
+        if session:
+            session.touch()
+        return session
 
-        # If no session exists yet, auto-create one for seamless standalone run
-        if not self._sessions:
-            return self.create_session("case_chest_pain_001", "参赛学员")
-
-        return next(iter(self._sessions.values()), None)
+    def _purge_stale_sessions(self) -> None:
+        now = time.time()
+        stale = [
+            sid for sid, s in self._sessions.items()
+            if s.is_finished or (now - s.last_active_at) > SESSION_TTL_SECONDS
+        ]
+        for sid in stale:
+            self._sessions.pop(sid, None)
 
     def get_all_sessions(self) -> Dict[str, SimulationSession]:
         return self._sessions

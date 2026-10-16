@@ -1,5 +1,6 @@
 """OSCE Clinical Reasoning Assessment and GED Evaluation REST Routes."""
 
+import asyncio
 from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, Query
 from app.models.schemas import EvaluationRequest, EvaluationResponse
@@ -22,10 +23,12 @@ async def submit_case_evaluation(req: EvaluationRequest):
     session.is_finished = True
     session.is_active = False
 
-    # Execute NetworkX Graph Edit Distance evaluation
-    assessment = session.ged_evaluator.evaluate(
-        action_records=session.action_history,
-        final_diagnosis=req.final_diagnosis
+    # Execute NetworkX Graph Edit Distance evaluation. The evaluator may call
+    # the synchronous LLM client when online, so keep it off the event loop.
+    assessment = await asyncio.to_thread(
+        session.ged_evaluator.evaluate,
+        session.action_history,
+        req.final_diagnosis
     )
     session.final_assessment = assessment
 
@@ -53,7 +56,9 @@ async def get_evaluation_report(session_id: str):
 
     if not session.final_assessment:
         # If not evaluated yet, generate on-the-fly
-        assessment = session.ged_evaluator.evaluate(session.action_history, "")
+        assessment = await asyncio.to_thread(
+            session.ged_evaluator.evaluate, session.action_history, ""
+        )
         session.final_assessment = assessment
 
     assessment = session.final_assessment
